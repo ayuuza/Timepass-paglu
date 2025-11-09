@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Flappy Pankaj — Upload Bird & Obstacle</title>
+<style>
+  :root{--bg:#87CEEB;--panel:#fff;--muted:#555}
+  body{margin:0;font-family:Inter,Arial,Helvetica;background:var(--bg);color:#222}
+  .wrap{max-width:980px;margin:16px auto;padding:14px}
+  header{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  h1{margin:0;font-size:20px}
+  .card{background:var(--panel);border-radius:10px;padding:12px;box-shadow:0 8px 22px rgba(0,0,0,0.06);margin-top:12px}
+  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+  .drop{width:160px;height:120px;border:2px dashed rgba(0,0,0,0.08);border-radius:10px;display:flex;align-items:center;justify-content:center;flex-direction:column;cursor:pointer;background:rgba(255,255,255,0.6)}
+  .drop.small{width:120px;height:120px}
+  .label{font-size:13px;margin-top:6px;color:var(--muted)}
+  canvas#game{display:block;margin:14px auto;border-radius:8px;background:linear-gradient(#70c5ff,#a6e1ff)}
+  .controls{display:flex;gap:8px;align-items:center}
+  button{padding:8px 12px;border-radius:8px;border:0;cursor:pointer;background:#0b84ff;color:#fff}
+  .muted{background:#eee;color:#333}
+  .small{font-size:13px;color:var(--muted)}
+  .thumb{max-width:100%;max-height:100%;border-radius:6px}
+  .hint{font-size:13px;color:#777}
+  @media(max-width:640px){.row{flex-direction:column;align-items:flex-start}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Flappy Pankaj — Upload Bird & Obstacle</h1>
+    <div class="small">Drop PNG/JPG images below — bird becomes character, obstacle becomes pipes</div>
+  </header>
+
+  <div class="card">
+    <div class="row">
+      <div id="birdDrop" class="drop" title="Drop or click to choose bird (100×100)"><div id="birdPreviewWrap"><div class="hint">Bird (100×100)</div></div><div class="label">Click / Drop</div></div>
+      <div id="obsDrop" class="drop" title="Drop or click to choose obstacle (80×400)"><div id="obsPreviewWrap"><div class="hint">Obstacle (80×400)</div></div><div class="label">Click / Drop</div></div>
+
+      <div style="flex:1">
+        <div class="small">Or use these controls:</div>
+        <div style="margin-top:8px" class="row">
+          <input id="birdFile" type="file" accept="image/*">
+          <input id="obsFile" type="file" accept="image/*">
+          <button id="clearBtn" class="muted">Clear Saved Images</button>
+        </div>
+        <div style="margin-top:10px" class="hint">Images saved in your browser (does not upload to GitHub). To publish: upload this file to GitHub repo as <code>index.html</code> and enable GitHub Pages (Settings → Pages → choose branch).</div>
+      </div>
+    </div>
+  </div>
+
+  <canvas id="game" width="480" height="720"></canvas>
+
+  <div class="card row" style="justify-content:space-between;">
+    <div>
+      <strong>Score:</strong> <span id="score">0</span> &nbsp; <strong>Best:</strong> <span id="best">0</span>
+    </div>
+    <div class="controls">
+      <button id="startBtn">Start/Restart</button>
+      <button id="pauseBtn" class="muted">Pause</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ------------------ Helpers: read file -> HTMLImage, resize to fixed px ------------------
+function readFileAsImage(file) {
+  return new Promise((res, rej) => {
+    if(!file) return res(null);
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); res(img); };
+    img.onerror = (e) => { URL.revokeObjectURL(url); rej(e); };
+    img.src = url;
+  });
+}
+
+// Resize image into exact (w,h) canvas while keeping center (contain but centered)
+function resizeTo(img, w, h) {
+  const oc = document.createElement('canvas'); oc.width = w; oc.height = h;
+  const c = oc.getContext('2d'); c.clearRect(0,0,w,h);
+  const arSrc = img.width / img.height;
+  const arDst = w / h;
+  let dw, dh;
+  if(arSrc > arDst) { // source wider -> scale height to h
+    dh = h; dw = Math.round(h * arSrc);
+  } else { // source taller -> scale width to w
+    dw = w; dh = Math.round(w / arSrc);
+  }
+  const dx = Math.round((w - dw) / 2);
+  const dy = Math.round((h - dh) / 2);
+  c.drawImage(img, dx, dy, dw, dh);
+  const out = new Image();
+  out.src = oc.toDataURL('image/png');
+  return out;
+}
+
+// Convert image element/dataURL to dataURL PNG (already done by resizeTo)
+// ------------------ UI wiring ------------------
+const birdDrop = document.getElementById('birdDrop');
+const obsDrop = document.getElementById('obsDrop');
+const birdFile = document.getElementById('birdFile');
+const obsFile = document.getElementById('obsFile');
+const birdPreviewWrap = document.getElementById('birdPreviewWrap');
+const obsPreviewWrap = document.getElementById('obsPreviewWrap');
+const clearBtn = document.getElementById('clearBtn');
+
+let birdSprite = null; // HTMLImageElement sized 100x100
+let obsSprite = null;  // HTMLImageElement sized 80x400
+
+// load saved from localStorage (data URLs)
+function loadSaved() {
+  const bd = localStorage.getItem('fp_bird');
+  const od = localStorage.getItem('fp_obs');
+  const best = localStorage.getItem('fp_best');
+  if(best) document.getElementById('best').textContent = parseInt(best,10);
+  if(bd) { const i=new Image(); i.onload=()=>{ birdSprite = i; showPreview(i, birdPreviewWrap); }; i.src = bd; }
+  if(od) { const i=new Image(); i.onload=()=>{ obsSprite = i; showPreview(i, obsPreviewWrap); }; i.src = od; }
+}
+loadSaved();
+
+function showPreview(img, wrap) {
+  wrap.innerHTML = '';
+  const el = document.createElement('img'); el.className='thumb'; el.src = img.src;
+  el.style.maxWidth='140px'; el.style.maxHeight='100px';
+  wrap.appendChild(el);
+}
+
+async function handleFile(file, isBird) {
+  if(!file) return;
+  try {
+    const img = await readFileAsImage(file);
+    if(isBird) {
+      const r = resizeTo(img, 100, 100);
+      r.onload = ()=> {
+        birdSprite = r;
+        showPreview(r, birdPreviewWrap);
+        localStorage.setItem('fp_bird', r.src);
+      };
+    } else {
+      const r = resizeTo(img, 80, 400);
+      r.onload = ()=> {
+        obsSprite = r;
+        showPreview(r, obsPreviewWrap);
+        localStorage.setItem('fp_obs', r.src);
+      };
+    }
+  } catch(e) { alert('Error reading file'); console.error(e); }
+}
+
+// Drag & drop helpers
+function setupDrop(el, isBird) {
+  el.addEventListener('dragover', (e)=>{ e.preventDefault(); el.style.borderColor='#0b84ff'; });
+  el.addEventListener('dragleave', ()=>{ el.style.borderColor=''; });
+  el.addEventListener('drop', (e)=>{ e.preventDefault(); el.style.borderColor=''; const f = e.dataTransfer.files[0]; handleFile(f,isBird); });
+  el.addEventListener('click', ()=>{ if(isBird) birdFile.click(); else obsFile.click(); });
+}
+setupDrop(birdDrop, true);
+setupDrop(obsDrop, false);
+
+birdFile.addEventListener('change',(e)=> handleFile(e.target.files[0], true));
+obsFile.addEventListener('change',(e)=> handleFile(e.target.files[0], false));
+clearBtn.addEventListener('click', ()=>{
+  localStorage.removeItem('fp_bird'); localStorage.removeItem('fp_obs');
+  birdSprite = null; obsSprite = null;
+  birdPreviewWrap.innerHTML = '<div class="hint">Bird (100×100)</div>';
+  obsPreviewWrap.innerHTML = '<div class="hint">Obstacle (80×400)</div>';
+  alert('Saved images cleared from this browser.');
+});
+
+// ------------------ Simple Flappy Game ------------------
+const canvas = document.getElementById('game'); const ctx = canvas.getContext('2d');
+let W = canvas.width, H = canvas.height;
+let bird = { x: Math.round(W*0.28), y: Math.round(H/2), r: 18, vy:0 };
+let pipes = [], score = 0, best = parseInt(localStorage.getItem('fp_best')||0,10) || 0;
+document.getElementById('best').textContent = best;
+let running=false, paused=false, frame=0;
+
+function createDefaultSprites(){
+  const b=document.createElement('canvas'); b.width=100; b.height=100; const bc=b.getContext('2d');
+  bc.clearRect(0,0,100,100); bc.fillStyle='#ffdd59'; bc.beginPath(); bc.arc(50,50,36,0,Math.PI*2); bc.fill();
+  bc.fillStyle='#333'; bc.beginPath(); bc.arc(62,44,8,0,Math.PI*2); bc.fill(); const bi=new Image(); bi.src=b.toDataURL('image/png');
+  const o=document.createElement('canvas'); o.width=80; o.height=400; const oc=o.getContext('2d');
+  oc.fillStyle='#2f8f2f'; oc.fillRect(0,0,80,400); const oi=new Image(); oi.src=o.toDataURL('image/png');
+  return { bi, oi };
+}
+const defs = createDefaultSprites();
+if(!birdSprite) birdSprite = defs.bi;
+if(!obsSprite) obsSprite = defs.oi;
+
+function resetState(){
+  bird = { x: Math.round(W*0.28), y: Math.round(H/2), r: 18, vy:0 };
+  pipes = []; score=0; frame=0; document.getElementById('score').textContent = 0;
+}
+
+function spawnPipe() {
+  const gap = 150;
+  const top = Math.floor(Math.random()*(H-gap-180))+40;
+  pipes.push({ x: W+30, top, gap, passed:false });
+}
+
+function drawBackground() {
+  ctx.fillStyle='#76c043'; ctx.fillRect(0,H-60,W,60);
+}
+
+function drawBird(){
+  if(birdSprite && birdSprite.complete){
+    const size = 100 * (bird.r/18);
+    ctx.save(); ctx.translate(bird.x,bird.y);
+    const angle = Math.max(-0.7, Math.min(0.7, bird.vy/10)); ctx.rotate(angle);
+    ctx.drawImage(birdSprite, -size/2, -size/2, size, size); ctx.restore();
+  } else { ctx.beginPath(); ctx.fillStyle='#ffdd59'; ctx.arc(bird.x,bird.y,bird.r,0,Math.PI*2); ctx.fill(); }
+}
+
+function drawPipes(){
+  for(const p of pipes){
+    const w=80;
+    if(obsSprite && obsSprite.complete){
+      ctx.drawImage(obsSprite, p.x, 0, w, p.top);
+      ctx.drawImage(obsSprite, p.x, p.top + p.gap, w, H - (p.top + p.gap) - 60);
+    } else { ctx.fillStyle='#2f8f2f'; ctx.fillRect(p.x,0,w,p.top); ctx.fillRect(p.x,p.top+p.gap,w,H-(p.top+p.gap)-60); }
+    ctx.fillStyle='rgba(0,0,0,0.06)'; ctx.fillRect(p.x, p.top-6, w, 6);
+  }
+}
+
+function circleRectCollide(cx,cy,r,rect){ const rx=Math.max(rect.x,Math.min(cx,rect.x+rect.w)); const ry=Math.max(rect.y,Math.min(cy,rect.y+rect.h)); const dx=cx-rx, dy=cy-ry; return (dx*dx+dy*dy) <= (r*r); }
+
+function physicsStep(){
+  const gravity = 0.7; bird.vy += gravity; bird.y += bird.vy;
+  if(bird.y + bird.r > H-60){ bird.y = H-60-bird.r; bird.vy=0; endGame(); }
+  if(bird.y - bird.r < 0){ bird.y = bird.r; bird.vy = 0; }
+}
+
+function checkCollision(){
+  for(const p of pipes){
+    const w = 80;
+    const topRect = {x:p.x, y:0, w:w, h:p.top};
+    const botRect = {x:p.x, y:p.top + p.gap, w:w, h:H - (p.top + p.gap) - 60};
+    if(circleRectCollide(bird.x,bird.y,bird.r,topRect) || circleRectCollide(bird.x,bird.y,bird.r,botRect)) { endGame(); return; }
+    if(!p.passed && (p.x + w) < bird.x) { p.passed = true; score++; document.getElementById('score').textContent = score; }
+  }
+}
+
+function endGame(){
+  running = false; document.getElementById('status') && (document.getElementById('status').textContent = 'Game Over');
+  const b = parseInt(localStorage.getItem('fp_best')||0,10) || 0;
+  if(score > b) { localStorage.setItem('fp_best', score); document.getElementById('best').textContent = score; }
+}
+
+function update(){
+  if(!running || paused) return;
+  frame++;
+  if(frame % 90 === 0) spawnPipe();
+  for(let i=pipes.length-1;i>=0;i--){ pipes[i].x -= 3 + Math.min(6, score*0.08); if(pipes[i].x + 90 < -60) pipes.splice(i,1); }
+  physicsStep(); checkCollision();
+}
+
+function render(){ ctx.clearRect(0,0,W,H); drawBackground(); drawPipes(); drawBird(); }
+
+function loop(){ update(); render(); if(running) requestAnimationFrame(loop); }
+
+function flap(){ bird.vy = -10; }
+
+window.addEventListener('keydown',(e)=>{ if(e.code==='Space'){ e.preventDefault(); if(!running) startGame(); flap(); } if(e.key==='p'||e.key==='P') togglePause(); });
+canvas.addEventListener('click', ()=>{ if(!running) startGame(); flap(); });
+
+function startGame(){ resetState(); running=true; paused=false; document.getElementById('status') && (document.getElementById('status').textContent='Playing'); requestAnimationFrame(loop); }
+function togglePause(){ if(!running) return; paused = !paused; document.getElementById('pauseBtn').textContent = paused ? 'Resume' : 'Pause'; }
+
+// update sprites on load from storage (if present)
+(function init() {
+  // when localStorage sets images they were loaded earlier by loadSaved()
+  if(!birdSprite) birdSprite = defs.bi;
+  if(!obsSprite) obsSprite = defs.oi;
+  // ensure preview shown
+  if(birdSprite) showPreview(birdSprite, birdPreviewWrap);
+  if(obsSprite) showPreview(obsSprite, obsPreviewWrap);
+  // small demo pipes
+  spawnPipe(); spawnPipe();
+  render();
+})();
+
+// If the user uploaded new images and saved to localStorage earlier, we want to update sprites too.
+// Watch for changes in localStorage (optional across tabs)
+window.addEventListener('storage', (e)=> {
+  if(e.key === 'fp_bird'){ const img=new Image(); img.onload=()=>{ birdSprite=img; showPreview(img,birdPreviewWrap); }; img.src=e.newValue; }
+  if(e.key === 'fp_obs'){ const img=new Image(); img.onload=()=>{ obsSprite=img; showPreview(img,obsPreviewWrap); }; img.src=e.newValue; }
+});
+
+</script>
+</body>
+</html>
